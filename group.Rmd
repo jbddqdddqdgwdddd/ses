@@ -1,0 +1,138 @@
+---
+title: "782-GroupProject"
+author: "Yifan Wang"
+date: "2023-05-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(fpp3)
+library(kableExtra)
+library(forecast)
+library(tseries)
+library(fable)
+Sys.setlocale("LC_TIME", "English")
+```
+
+
+
+```{r}
+data<- read_csv("employed.csv") %>% 
+  mutate(Quarter = yearquarter(Quarter)) %>%
+  as_tsibble(index = Quarter)
+
+Financial<-data[,c(1,11)]
+Financial%>%autoplot() + 
+  theme_minimal()
+decomposed_data <- stl(Financial, s.window="periodic")
+plot(decomposed_data)
+###判断为seasonal，用seasonal arima去做
+```
+
+
+
+```{r}
+###对模型进行差分
+
+Financial %>%
+gg_tsdisplay(difference(`Financial and Insurance Services`, 4),
+plot_type = "partial", lag_max = 36) +
+labs(title = "Seasonally differened series")
+
+Financial %>%
+gg_tsdisplay(difference(`Financial and Insurance Services`, 4)%>%difference(),
+plot_type = "partial", lag_max = 36) +
+labs(title = "Double differened series")
+###一阶差分变得平稳了，d=1
+```
+
+
+```{r}
+# 自动选择最优ARIMA模型
+fit <- Financial %>% 
+  model(search = ARIMA(`Financial and Insurance Services`, 
+                     stepwise = FALSE),
+        stepwise = ARIMA(`Financial and Insurance Services`))
+glance(fit) %>%
+  arrange(AICc)
+fit %>%
+  select(search) %>%
+  report()
+
+# 手动选择ARIMA
+fit_arima2 <- Financial %>%
+  model(m1 = ARIMA(`Financial and Insurance Services` ~ pdq(1,1,0) + PDQ(1,0,0)),
+        m2 = ARIMA(`Financial and Insurance Services`~ pdq(0,1,1) + PDQ(1,0,0)))
+
+glance(fit_arima2 ) %>% arrange(AICc) %>% select(.model:BIC)
+###m2 更小选M2
+```
+
+
+```{r}
+# 自动选择ETS模型
+fit_ets <- data %>% model(ETS(`Financial and Insurance Services`))
+# 输出模型结果
+report(fit_ets)
+fit_ets%>%forecast(h=8)
+# 手动选择ETS模型
+fit_ets2 <- data %>%
+  model(ANN = ETS(`Financial and Insurance Services` ~ error("A") + trend("N") + season("N")),
+        AAN = ETS(`Financial and Insurance Services` ~ error("A") + trend("A") + season("N")),
+        AAdN = ETS(`Financial and Insurance Services` ~ error("A") + trend("Ad") + season("N")))
+
+fit_ets2%>%forecast(h=8)
+
+
+glance(fit_ets2) %>%
+  select(.model, AICc)
+###选ANN ，然后确认alpha
+fit_ets2 <- data %>%
+  model(`0.1` = ETS(`Financial and Insurance Services` ~ error("A") + trend("N", alpha = 0.01) + season("N")),
+        `0.4` = ETS(`Financial and Insurance Services` ~ error("A") + trend("N", alpha = 0.1) + season("N")),
+        `0.7` = ETS(`Financial and Insurance Services` ~ error("A") + trend("N", alpha = 0.9) + season("N")),
+        `0.9` = ETS(`Financial and Insurance Services` ~ error("A") + trend("N", alpha = 0.99) + season("N")))
+glance(fit_ets2)
+###0.7 AIC最小，alpha接近0.7
+```
+
+
+```{r}
+##比较ETS和ARIMA
+# train<-Financial[1:55,]
+# test<-Financial[56:63,]
+# 
+# train %>%stretch_tsibble(.init = 12) %>%
+#   model(ets = ETS(`Financial and Insurance Services`),
+#         arima = ARIMA(`Financial and Insurance Services`)) %>%
+#   forecast(h = 8) %>%
+#   accuracy(Financial) %>%
+#   select(.model, RMSE:MAPE)
+```
+
+
+```{r}
+###生成残差和ljung_box分析
+###a)ETS分析
+fit_ets %>%
+  gg_tsresiduals()
+fit_ets %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 10, dof = 3)
+##The innovation residuals appear to have constant variance with no outstanding outlier. The innovation residuals appear to be consistent with white noise as there are only 1 slightly significant autocorrelations at lag 11.This is further backed up by the Ljung-Box test that does not reject the null hypothesis of independence.
+
+###b)ARIMA分析
+fit %>%
+  select(stepwise) %>%
+  gg_tsresiduals()
+fit %>%
+  select(stepwise) %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 10, dof = 3)
+##The innovation residuals appear to have constant variance with no outstanding outlier. The innovation residuals appear to be consistent with white noise as there are only 1 slightly significant autocorrelations at lag 11(hard to tell).This is further backed up by the Ljung-Box test that does not reject the null hypothesis of independence.
+
+```
+
+
